@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codegangsta/martini"
+	"github.com/treetopllc/martini"
 )
 
 func TestBind(t *testing.T) {
