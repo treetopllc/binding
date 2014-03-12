@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-martini/martini"
+	"github.com/treetopllc/martini"
 )
 
 var jsonTestCases = []jsonTestCase{
