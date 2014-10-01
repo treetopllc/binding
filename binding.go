@@ -4,15 +4,18 @@
 package binding
 
 import (
+	"encoding"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/go-martini/martini"
+	"github.com/treetopllc/martini"
 )
 
 /*
@@ -68,7 +71,7 @@ func Bind(obj interface{}, ifacePtr ...interface{}) martini.Handler {
 // keys, for example: key=val1&key=val2&key=val3
 // An interface pointer can be added as a second argument in order
 // to map the struct to a specific interface.
-func Form(formStruct interface{}, ifacePtr ...interface{}) martini.Handler {
+func form(tag string, formStruct interface{}, ifacePtr ...interface{}) martini.Handler {
 	return func(context martini.Context, req *http.Request) {
 		var errors Errors
 
@@ -83,9 +86,15 @@ func Form(formStruct interface{}, ifacePtr ...interface{}) martini.Handler {
 		if parseErr != nil {
 			errors.Add([]string{}, DeserializationError, parseErr.Error())
 		}
-		mapForm(formStruct, req.Form, nil, errors)
+		mapForm(formStruct, req.Form, nil, errors, tag)
 		validateAndMap(formStruct, context, errors, ifacePtr...)
 	}
+}
+func Form(formStruct interface{}, ifacePtr ...interface{}) martini.Handler {
+	return form("form", formStruct, ifacePtr...)
+}
+func JsonForm(formStruct interface{}, ifacePtr ...interface{}) martini.Handler {
+	return form("json", formStruct, ifacePtr...)
 }
 
 // MultipartForm works much like Form, except it can parse multipart forms
@@ -115,7 +124,7 @@ func MultipartForm(formStruct interface{}, ifacePtr ...interface{}) martini.Hand
 			}
 		}
 
-		mapForm(formStruct, req.MultipartForm.Value, req.MultipartForm.File, errors)
+		mapForm(formStruct, req.MultipartForm.Value, req.MultipartForm.File, errors, "form")
 		validateAndMap(formStruct, context, errors, ifacePtr...)
 	}
 
@@ -168,7 +177,7 @@ func Validate(obj interface{}) martini.Handler {
 			for i := 0; i < v.Len(); i++ {
 
 				e := v.Index(i).Interface()
-				errors = validateStruct(errors, e)
+				errors = validateStruct(errors, e, "form")
 
 				if validator, ok := e.(Validator); ok {
 					errors = validator.Validate(errors, req)
@@ -176,7 +185,7 @@ func Validate(obj interface{}) martini.Handler {
 			}
 		} else {
 
-			errors = validateStruct(errors, obj)
+			errors = validateStruct(errors, obj, "form")
 
 			if validator, ok := obj.(Validator); ok {
 				errors = validator.Validate(errors, req)
@@ -187,7 +196,7 @@ func Validate(obj interface{}) martini.Handler {
 }
 
 // Performs required field checking on a struct
-func validateStruct(errors Errors, obj interface{}) Errors {
+func validateStruct(errors Errors, obj interface{}, tag string) Errors {
 	typ := reflect.TypeOf(obj)
 	val := reflect.ValueOf(obj)
 
@@ -200,7 +209,7 @@ func validateStruct(errors Errors, obj interface{}) Errors {
 		field := typ.Field(i)
 
 		// Skip ignored and unexported fields in the struct
-		if field.Tag.Get("form") == "-" || !val.Field(i).CanInterface() {
+		if field.Tag.Get(tag) == "-" || !val.Field(i).CanInterface() {
 			continue
 		}
 
@@ -211,7 +220,7 @@ func validateStruct(errors Errors, obj interface{}) Errors {
 		if field.Type.Kind() == reflect.Struct ||
 			(field.Type.Kind() == reflect.Ptr && !reflect.DeepEqual(zero, fieldValue) &&
 				field.Type.Elem().Kind() == reflect.Struct) {
-			errors = validateStruct(errors, fieldValue)
+			errors = validateStruct(errors, fieldValue, tag)
 		}
 
 		if strings.Index(field.Tag.Get("binding"), "required") > -1 {
@@ -219,7 +228,7 @@ func validateStruct(errors Errors, obj interface{}) Errors {
 				name := field.Name
 				if j := field.Tag.Get("json"); j != "" {
 					name = j
-				} else if f := field.Tag.Get("form"); f != "" {
+				} else if f := field.Tag.Get(tag); f != "" {
 					name = f
 				}
 				errors.Add([]string{name}, RequiredError, "Required")
@@ -231,7 +240,7 @@ func validateStruct(errors Errors, obj interface{}) Errors {
 
 // Takes values from the form data and puts them into a struct
 func mapForm(formStruct reflect.Value, form map[string][]string,
-	formfile map[string][]*multipart.FileHeader, errors Errors) {
+	formfile map[string][]*multipart.FileHeader, errors Errors, tag string) {
 
 	if formStruct.Kind() == reflect.Ptr {
 		formStruct = formStruct.Elem()
@@ -244,13 +253,13 @@ func mapForm(formStruct reflect.Value, form map[string][]string,
 
 		if typeField.Type.Kind() == reflect.Ptr && typeField.Anonymous {
 			structField.Set(reflect.New(typeField.Type.Elem()))
-			mapForm(structField.Elem(), form, formfile, errors)
+			mapForm(structField.Elem(), form, formfile, errors, tag)
 			if reflect.DeepEqual(structField.Elem().Interface(), reflect.Zero(structField.Elem().Type()).Interface()) {
 				structField.Set(reflect.Zero(structField.Type()))
 			}
 		} else if typeField.Type.Kind() == reflect.Struct {
-			mapForm(structField, form, formfile, errors)
-		} else if inputFieldName := typeField.Tag.Get("form"); inputFieldName != "" {
+			mapForm(structField, form, formfile, errors, tag)
+		} else if inputFieldName := strings.Split(typeField.Tag.Get(tag), ",")[0]; inputFieldName != "" {
 			if !structField.CanSet() {
 				continue
 			}
@@ -373,6 +382,56 @@ func setWithProperType(valueKind reflect.Kind, val string, structField reflect.V
 		}
 	case reflect.String:
 		structField.SetString(val)
+	default:
+		decodingNull := false
+
+		// If v is a named type and is addressable,
+		// start with its address, so that if the type has pointer methods,
+		// we find them.
+		if structField.Kind() != reflect.Ptr && structField.Type().Name() != "" && structField.CanAddr() {
+			structField = structField.Addr()
+		}
+		for {
+			// Load value from interface, but only if the result will be
+			// usefully addressable.
+			if structField.Kind() == reflect.Interface && !structField.IsNil() {
+				e := structField.Elem()
+				if e.Kind() == reflect.Ptr && !e.IsNil() && (!decodingNull || e.Elem().Kind() == reflect.Ptr) {
+					structField = e
+					continue
+				}
+			}
+
+			if structField.Kind() != reflect.Ptr {
+				break
+			}
+
+			if structField.Elem().Kind() != reflect.Ptr && decodingNull && structField.CanSet() {
+				break
+			}
+			if structField.IsNil() {
+				structField.Set(reflect.New(structField.Type().Elem()))
+			}
+
+			//Hack for TreeTopTime!
+			if t, ok := structField.Interface().(*time.Time); ok {
+				var err error
+				*t, err = time.Parse("01-02-2006", val)
+				if err != nil {
+					println("error parsing time: " + val)
+				}
+				break
+			}
+
+			if structField.Type().NumMethod() > 0 {
+				if u, ok := structField.Interface().(encoding.TextUnmarshaler); ok {
+					u.UnmarshalText([]byte(val))
+					fmt.Printf("%s from %s\n", u, val)
+					break
+				}
+			}
+			structField = structField.Elem()
+		}
 	}
 }
 
