@@ -1,5 +1,9 @@
 package binding
 
+import (
+	"strings"
+)
+
 type (
 	// Errors may be generated during deserialization, binding,
 	// or validation. This type is mapped to the context so you
@@ -37,6 +41,14 @@ func (e *Errors) Add(fieldNames []string, classification, message string) {
 		Classification: classification,
 		Message:        message,
 	})
+}
+
+func (e *Errors) FieldSet() map[string]string {
+	res := make(map[string]string)
+	for _, err := range *e {
+		res[strings.Join(err.FieldNames, ",")] = err.Message
+	}
+	return res
 }
 
 // Len returns the number of errors.
